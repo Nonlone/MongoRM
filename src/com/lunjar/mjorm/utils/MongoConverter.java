@@ -3,10 +3,13 @@ package com.lunjar.mjorm.utils;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.lang.reflect.ParameterizedType;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import com.mongodb.BasicDBList;
@@ -21,7 +24,7 @@ import com.mongodb.DBObject;
  */
 public class MongoConverter {
 
-	public static <T> T dbobject2Bean(Class<?> classOfT, DBObject dboject)  {
+	public static <T> T dbobject2Bean(Class<?> classOfT, DBObject dboject) {
 		//返回泛型
 		T entity;
 		try {
@@ -31,22 +34,53 @@ public class MongoConverter {
 		} catch (IllegalAccessException e) {
 			return null;
 		}
-		
+		if (dboject == null)
+			return null;
 		Map<String, Method> methodMap = new HashMap<String, Method>();
+		Set<Field> fieldSet = new HashSet<Field>();
 		//初始化class
+		Class<?> clazz = classOfT;
+		while (clazz != Object.class) {
+			for (Field field : clazz.getDeclaredFields()) {
+				fieldSet.add(field);
+			}
+			clazz = clazz.getSuperclass();
+		}
 		for (Method method : classOfT.getMethods()) {
 			methodMap.put(method.getName(), method);
 		}
 		Set<String> keySet = dboject.keySet();
-		for (String key : keySet) {
+		for (Field field : fieldSet) {
 			//注入类
-			String methodName = "set" + upperFirst(key);
-			if (methodMap.containsKey(methodName) && dboject.get(key) != null) {
-				//反射注入
+			String fieldName = field.getName();
+			String methodName = "set" + upperFirst(fieldName);
+			if (keySet.contains(fieldName) && methodMap.containsKey(methodName)) {
+				//对应DBObject有key，注入
 				Method method = methodMap.get(methodName);
-				Object params = dboject.get(key);
+				Object params = dboject.get(fieldName);
 				try {
-					method.invoke(entity, params);
+					boolean colflag = false;
+					for (Class<?> fieldInterfaceType : field.getType().getInterfaces()) {
+						//查看类型的全部接口
+						if (fieldInterfaceType.getSimpleName().equals("Collection")) {
+							//带有Collection接口
+							colflag = true;
+							break;
+						}
+					}
+					if (colflag) {
+						//集合类型
+						BasicDBList bdbl = (BasicDBList) params;
+						clazz = (Class<?>) ((ParameterizedType) field.getGenericType()).getActualTypeArguments()[0];
+						List<T> listParams = new ArrayList<T>();
+						for (int i = 0; i < bdbl.size(); i++) {
+							DBObject dbObject = (DBObject) bdbl.get(i);
+							listParams.add((T) MongoConverter.dbobject2Bean(clazz, dbObject));
+						}
+						method.invoke(entity, listParams);
+					} else {
+						method.invoke(entity, params);
+					}
 				} catch (IllegalArgumentException e) {
 					continue;
 				} catch (IllegalAccessException e) {
@@ -71,14 +105,19 @@ public class MongoConverter {
 		}
 		Set<Field> fieldSet = new HashSet<Field>();
 		Class clazz = entity.getClass();
-		while(clazz!=Object.class){
+		while (clazz != Object.class) {
 			for (Field field : clazz.getDeclaredFields()) {
 				fieldSet.add(field);
 			}
 			clazz = clazz.getSuperclass();
 		}
 		for (Field field : fieldSet) {
-			String methodName = "get" + upperFirst(field.getName());
+			String methodName;
+			if (field.getType() != Boolean.class && field.getType() != boolean.class) {
+				methodName = "get" + upperFirst(field.getName());
+			} else {
+				methodName = "is" + upperFirst(field.getName());
+			}
 			if (methodMap.containsKey(methodName)) {
 				Method method = methodMap.get(methodName);
 				//用get方法取得bean的结果
@@ -114,16 +153,16 @@ public class MongoConverter {
 							//递归转换
 							bdbl.add(bean2DBObject(o));
 						}
-						dboject.put(field.getName(), value);
-					} else if(obj instanceof Object[]){
+						dboject.put(field.getName(), bdbl);
+					} else if (obj instanceof Object[]) {
 						Object[] value = (Object[]) obj;
 						BasicDBList bdbl = new BasicDBList();
 						for (Object o : value) {
 							//递归转换
 							bdbl.add(bean2DBObject(o));
 						}
-						dboject.put(field.getName(), value);
-					}else {
+						dboject.put(field.getName(), bdbl);
+					} else {
 						//其他情况
 						dboject.put(field.getName(), obj);
 					}
